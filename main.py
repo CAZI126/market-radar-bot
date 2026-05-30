@@ -36,7 +36,7 @@ BINANCE_PRICE_CACHE: Dict[str, float] = {}
 HYPERLIQUID_MIDS_CACHE: Optional[Dict[str, Any]] = None
 OSTIUM_LATEST_PRICES_CACHE: Optional[Any] = None
 
-MAX_LINES_PER_SIDE = 10
+MAX_LINES_PER_SIDE = 5
 MAX_FOCUS_LINES = 3
 
 
@@ -84,10 +84,10 @@ def normalize_symbol(text: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (text or "").lower())
 
 
-def format_pct(p: Optional[float]) -> str:
+def format_yes_ratio(p: Optional[float]) -> str:
     if p is None:
         return "n/a"
-    return f"{p * 100:.1f}%"
+    return f"{p * 10:.1f}割"
 
 
 def parse_jsonish(value: Any) -> Any:
@@ -233,6 +233,9 @@ def normalize_possible_center_price(raw_price: Any, market: Dict[str, Any]) -> O
     manual = safe_float(market.get("manual_center"))
     range_pct = safe_float(market.get("range_pct"), 0.1) or 0.1
 
+    key = str(market.get("key", "")).lower()
+    category = str(market.get("category", "")).lower()
+
     candidates = [
         p,
         p / 10,
@@ -248,15 +251,25 @@ def normalize_possible_center_price(raw_price: Any, market: Dict[str, Any]) -> O
     ]
 
     if manual is not None and manual > 0:
-        low = manual * (1 - max(range_pct, 0.25))
-        high = manual * (1 + max(range_pct, 0.25))
+        # WTI/Oilは価格帯が狭いため厳しめ。
+        # manual 87 のとき、100を誤採用しないため。
+        if "oil" in key or "wti" in key or category == "oil":
+            guard_pct = 0.08
+        elif "gold" in key or "xau" in key:
+            guard_pct = 0.12
+        elif "silver" in key or "xag" in key:
+            guard_pct = 0.15
+        else:
+            guard_pct = max(range_pct, 0.25)
+
+        low = manual * (1 - guard_pct)
+        high = manual * (1 + guard_pct)
 
         for x in candidates:
             if low <= x <= high:
                 return x
 
-    key = str(market.get("key", "")).lower()
-    category = str(market.get("category", "")).lower()
+        return None
 
     if "btc" in key:
         for x in candidates:
@@ -278,7 +291,7 @@ def normalize_possible_center_price(raw_price: Any, market: Dict[str, Any]) -> O
             if 10 <= x <= 300:
                 return x
 
-    if "oil" in key or category == "oil":
+    if "oil" in key or "wti" in key or category == "oil":
         for x in candidates:
             if 40 <= x <= 200:
                 return x
@@ -382,6 +395,7 @@ def fetch_ostium_latest_prices() -> Optional[Any]:
 
 
 def extract_price_from_dict(obj: Dict[str, Any], market: Dict[str, Any]) -> Optional[float]:
+    # bid / ask / answer は市場価格ではない値を拾うことがあるため除外。
     price_keys = [
         "price",
         "value",
@@ -392,9 +406,10 @@ def extract_price_from_dict(obj: Dict[str, Any], market: Dict[str, Any]) -> Opti
         "index_price",
         "oraclePrice",
         "oracle_price",
-        "answer",
-        "bid",
-        "ask",
+        "currentPrice",
+        "current_price",
+        "lastPrice",
+        "last_price",
     ]
 
     for key in price_keys:
@@ -445,7 +460,7 @@ def walk_ostium_for_asset(data: Any, asset_names: List[str], market: Dict[str, A
             if matched:
                 px = extract_price_from_dict(obj, market)
                 if px is not None:
-                    found.append((px, blob[:120]))
+                    found.append((px, blob[:160]))
 
             for k, v in obj.items():
                 walk(v, f"{path} {k}")
@@ -1198,25 +1213,20 @@ def thickness_score(
 
 
 def thickness_label(score: float) -> str:
-    if score >= 70:
-        return "厚"
+    if score >= 80:
+        return "█████"
+    if score >= 60:
+        return "████░"
     if score >= 40:
-        return "中"
-    return "薄"
+        return "███░░"
+    if score >= 20:
+        return "██░░░"
+    return "█░░░░"
 
 
 # ============================================================
 # Rendering
 # ============================================================
-
-def bar_for_probability(p: Optional[float]) -> str:
-    if p is None:
-        return ""
-
-    bar_count = int(round(p * 10))
-    bar_count = max(0, min(10, bar_count))
-    return "█" * bar_count + "░" * (10 - bar_count)
-
 
 def sort_rows_by_line(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return sorted(
@@ -1230,10 +1240,6 @@ def rows_total_count(rows: List[Dict[str, Any]]) -> int:
 
 
 def prepare_grid_rows(rows: List[Dict[str, Any]], center: float) -> List[Dict[str, Any]]:
-    """
-    価格ラインを一本のGridとして表示する。
-    down/overを分けすぎず、現在価格より下側・上側から近いものを残す。
-    """
     valid = [r for r in rows if r.get("line_value") is not None]
     valid = sort_rows_by_line(valid)
 
@@ -1287,14 +1293,10 @@ def render_row(
     thick = thickness_label(score)
     icon = f"{direction_icon(row.get('direction'))} " if with_icon else ""
 
-    return f"{icon}`{label:<8}` {bar_for_probability(p)} `{format_pct(p):>6}` `{thick}`"
+    return f"{icon}`{label} YES {format_yes_ratio(p)}` `{thick}`"
 
 
 def judge_market_bias(rows: List[Dict[str, Any]], center: float) -> str:
-    """
-    簡易判定。
-    現価格より上側の確率平均と下側の確率平均を見る。
-    """
     if not rows:
         return "判定不能"
 
@@ -1388,7 +1390,7 @@ def build_focus_lines(
 
     candidates = sorted(candidates, key=lambda x: x[0], reverse=True)
 
-    lines = []
+    selected_rows = []
     used = set()
 
     for _, row in candidates:
@@ -1398,12 +1400,17 @@ def build_focus_lines(
             continue
 
         used.add(key)
-        lines.append(render_row(row, total_m, center, market, with_icon=True))
+        selected_rows.append(row)
 
-        if len(lines) >= MAX_FOCUS_LINES:
+        if len(selected_rows) >= MAX_FOCUS_LINES:
             break
 
-    return lines
+    selected_rows = sort_rows_by_line(selected_rows)
+
+    return [
+        render_row(row, total_m, center, market, with_icon=True)
+        for row in selected_rows
+    ]
 
 
 def build_group_block(market: Dict[str, Any], rows: List[Dict[str, Any]]) -> str:
@@ -1457,8 +1464,8 @@ def build_group_block(market: Dict[str, Any], rows: List[Dict[str, Any]]) -> str
 
     lines.append("")
     lines.append("`注:`")
-    lines.append("`% = 予測市場のYES価格ベースの市場確率`")
-    lines.append("`薄 / 中 / 厚 = 市場データの厚み。確率の高さとは別`")
+    lines.append("`YES割合 = その価格ラインでYESが買われている割合`")
+    lines.append("`█░░░░〜█████ = 市場データの厚み。YES割合の高さとは別`")
 
     return "\n".join(lines)
 
