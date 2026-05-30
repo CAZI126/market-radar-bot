@@ -27,7 +27,6 @@ from config import (
     POLYMARKET_MAX_PAGES,
     KALSHI_LIMIT,
     MIN_VOLUME,
-    GRID_HALF_STEPS,
     DISCORD_MESSAGE_LIMIT,
 )
 
@@ -36,6 +35,9 @@ load_dotenv()
 BINANCE_PRICE_CACHE: Dict[str, float] = {}
 HYPERLIQUID_MIDS_CACHE: Optional[Dict[str, Any]] = None
 OSTIUM_LATEST_PRICES_CACHE: Optional[Any] = None
+
+MAX_LINES_PER_DIRECTION = 10
+MAX_FOCUS_LINES = 3
 
 
 # ============================================================
@@ -63,7 +65,7 @@ def safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
         return float(value)
 
     if isinstance(value, str):
-        s = value.strip().replace(",", "")
+        s = value.strip().replace(",", "").replace("$", "")
         if s == "":
             return default
         try:
@@ -113,6 +115,7 @@ def round_to_step(value: float, step: int) -> float:
 def is_near_step(value: float, step: int, tolerance: float = 1.0) -> bool:
     if step <= 0:
         return True
+
     nearest = round_to_step(value, step)
     return abs(value - nearest) <= tolerance
 
@@ -222,10 +225,6 @@ def get_all_search_queries(markets: List[Dict[str, Any]]) -> List[str]:
 # ============================================================
 
 def normalize_possible_center_price(raw_price: Any, market: Dict[str, Any]) -> Optional[float]:
-    """
-    Ostiumなどの価格がスケール付き整数で返った場合も拾えるようにする。
-    manual_centerの近くを優先する。
-    """
     p = safe_float(raw_price)
 
     if p is None or p <= 0:
@@ -256,7 +255,6 @@ def normalize_possible_center_price(raw_price: Any, market: Dict[str, Any]) -> O
             if low <= x <= high:
                 return x
 
-    # fallback ranges
     key = str(market.get("key", "")).lower()
     category = str(market.get("category", "")).lower()
 
@@ -265,9 +263,19 @@ def normalize_possible_center_price(raw_price: Any, market: Dict[str, Any]) -> O
             if 10_000 <= x <= 1_000_000:
                 return x
 
+    if "eth" in key:
+        for x in candidates:
+            if 500 <= x <= 50_000:
+                return x
+
     if "gold" in key or "xau" in key:
         for x in candidates:
             if 1_000 <= x <= 10_000:
+                return x
+
+    if "silver" in key or "xag" in key:
+        for x in candidates:
+            if 10 <= x <= 300:
                 return x
 
     if "oil" in key or category == "oil":
@@ -340,21 +348,13 @@ def fetch_hyperliquid_price(coin: str) -> Optional[float]:
     if not isinstance(data, dict):
         return None
 
-    # HyperliquidはBTC, ETHなどのキーで返る想定
-    candidates = [
-        coin,
-        coin.upper(),
-        coin.lower(),
-    ]
-
-    for key in candidates:
+    for key in [coin, coin.upper(), coin.lower()]:
         if key in data:
             price = safe_float(data.get(key))
             if price is not None and price > 0:
                 print(f"[INFO] Hyperliquid price {coin}: {price}")
                 return price
 
-    # 念のため大小文字無視で探す
     for k, v in data.items():
         if str(k).upper() == coin:
             price = safe_float(v)
@@ -450,10 +450,6 @@ def walk_ostium_for_asset(data: Any, asset_names: List[str], market: Dict[str, A
             for k, v in obj.items():
                 walk(v, f"{path} {k}")
 
-            return
-
-        # dict/list以外は無視
-
     walk(data)
 
     if not found:
@@ -513,7 +509,6 @@ def fetch_ostium_price(market: Dict[str, Any]) -> Optional[float]:
         if s and s not in candidates:
             candidates.append(s)
 
-    # 1. 個別APIを候補順に試す
     for asset in candidates:
         price = fetch_ostium_individual_price(asset, market)
 
@@ -521,7 +516,6 @@ def fetch_ostium_price(market: Dict[str, Any]) -> Optional[float]:
             print(f"[INFO] Ostium center {market.get('key')}: {price} / asset={asset}")
             return price
 
-    # 2. latest-prices全体から探す
     data = fetch_ostium_latest_prices()
 
     if data is None:
@@ -549,7 +543,6 @@ def choose_center(market: Dict[str, Any], rows: List[Dict[str, Any]]) -> Tuple[O
 
         manual = safe_float(market.get("manual_center"))
         if manual is not None and manual > 0:
-            print(f"[WARN] Using manual fallback for {market.get('key')}")
             return round_to_step(manual, step), "Manual fallback"
 
     if center_type == "hyperliquid":
@@ -560,7 +553,6 @@ def choose_center(market: Dict[str, Any], rows: List[Dict[str, Any]]) -> Tuple[O
 
         manual = safe_float(market.get("manual_center"))
         if manual is not None and manual > 0:
-            print(f"[WARN] Using manual fallback for {market.get('key')}")
             return round_to_step(manual, step), "Manual fallback"
 
     if center_type == "manual":
@@ -591,11 +583,8 @@ def choose_center(market: Dict[str, Any], rows: List[Dict[str, Any]]) -> Tuple[O
 
 
 def get_reference_center_for_filter(market: Dict[str, Any]) -> Optional[float]:
-    """
-    価格ライン抽出時のフィルター用。
-    APIは重いので、manual_centerを優先して十分。
-    """
     manual = safe_float(market.get("manual_center"))
+
     if manual is not None and manual > 0:
         return manual
 
@@ -650,6 +639,7 @@ def get_market_by_key(markets: List[Dict[str, Any]], key: str) -> Optional[Dict[
     for market in markets:
         if market.get("key") == key:
             return market
+
     return None
 
 
@@ -669,6 +659,70 @@ def format_line_label(value: float, market: Dict[str, Any]) -> str:
     return f"${value:g}"
 
 
+def detect_direction(title: str, line_value: Optional[float], market: Dict[str, Any]) -> str:
+    text = normalize_text(title)
+
+    down_patterns = [
+        "below",
+        "under",
+        "less than",
+        "at or below",
+        "close below",
+        "closes below",
+        "dip to",
+        "dip below",
+        "lower than",
+        "fall below",
+        "falls below",
+        "drop below",
+        "drops below",
+        "crash to",
+        "collapse to",
+        "go below",
+    ]
+
+    over_patterns = [
+        "above",
+        "over",
+        "greater than",
+        "at or above",
+        "close above",
+        "closes above",
+        "higher than",
+        "exceed",
+        "exceeds",
+        "go above",
+        "be above",
+    ]
+
+    for p in down_patterns:
+        if p in text:
+            return "down"
+
+    for p in over_patterns:
+        if p in text:
+            return "over"
+
+    ambiguous_patterns = [
+        "hit",
+        "hits",
+        "reach",
+        "reaches",
+        "touch",
+        "touches",
+    ]
+
+    if any(p in text for p in ambiguous_patterns):
+        ref_center = get_reference_center_for_filter(market)
+
+        if ref_center is not None and line_value is not None:
+            if line_value >= ref_center:
+                return "over"
+            return "down"
+
+    return "unknown"
+
+
 def extract_line(title: str, market: Dict[str, Any]) -> Tuple[Optional[str], Optional[float]]:
     text = title or ""
     step = int(market.get("grid_step") or 1)
@@ -676,7 +730,6 @@ def extract_line(title: str, market: Dict[str, Any]) -> Tuple[Optional[str], Opt
 
     money_candidates: List[float] = []
 
-    # $100,000 / $1,000,000
     for match in re.finditer(r"\$\s*([0-9]{1,3}(?:,[0-9]{3})+(?:\.\d+)?)", text):
         raw = match.group(1).replace(",", "")
         value = safe_float(raw)
@@ -684,7 +737,6 @@ def extract_line(title: str, market: Dict[str, Any]) -> Tuple[Optional[str], Opt
         if value is not None:
             money_candidates.append(value)
 
-    # $80 / $80.5 / $100k / 100k
     for match in re.finditer(r"\$?\s*\b([0-9]+(?:\.\d+)?)\s*([kKmM])?\b", text):
         raw = match.group(1)
         suffix = match.group(2)
@@ -702,18 +754,15 @@ def extract_line(title: str, market: Dict[str, Any]) -> Tuple[Optional[str], Opt
         money_candidates.append(value)
 
     filtered = []
-
     ref_center = get_reference_center_for_filter(market)
 
     for value in money_candidates:
-        # 年号除外
         if 2020 <= value <= 2035:
             continue
 
         if value <= 0:
             continue
 
-        # manual_centerがある銘柄は中心周辺だけ拾う
         if ref_center is not None and ref_center > 0:
             low = ref_center * (1 - range_pct)
             high = ref_center * (1 + range_pct)
@@ -831,33 +880,14 @@ def market_to_common_item(raw: Dict[str, Any], markets_config: List[Dict[str, An
     if not line_label:
         return None
 
+    direction = detect_direction(title, line_value, config_market)
+
     if source_hint == "Polymarket":
         probability = polymarket_yes_probability(raw)
     else:
         probability = kalshi_yes_probability(raw)
 
     if probability is None:
-        return None
-
-    volume = safe_float(
-        raw.get("volume")
-        or raw.get("volumeNum")
-        or raw.get("volume24hr")
-        or raw.get("volume_24hr")
-        or raw.get("open_interest")
-        or 0,
-        0,
-    )
-
-    liquidity = safe_float(
-        raw.get("liquidity")
-        or raw.get("liquidityNum")
-        or raw.get("open_interest")
-        or 0,
-        0,
-    )
-
-    if volume is not None and volume < MIN_VOLUME:
         return None
 
     market_id = str(
@@ -876,9 +906,8 @@ def market_to_common_item(raw: Dict[str, Any], markets_config: List[Dict[str, An
         "market_key": market_key,
         "line_label": line_label,
         "line_value": line_value,
+        "direction": direction,
         "probability": probability,
-        "volume": volume,
-        "liquidity": liquidity,
     }
 
 
@@ -950,12 +979,12 @@ def fetch_polymarket_search_markets(markets_config: List[Dict[str, Any]]) -> Lis
             if not item:
                 continue
 
-            market_id = item["market_id"]
+            dedupe_id = f"{item['market_id']}:{item['direction']}"
 
-            if market_id in seen_ids:
+            if dedupe_id in seen_ids:
                 continue
 
-            seen_ids.add(market_id)
+            seen_ids.add(dedupe_id)
             results.append(item)
 
         time.sleep(0.25)
@@ -998,12 +1027,12 @@ def fetch_polymarket_markets(markets_config: List[Dict[str, Any]]) -> List[Dict[
             if not item:
                 continue
 
-            market_id = item["market_id"]
+            dedupe_id = f"{item['market_id']}:{item['direction']}"
 
-            if market_id in seen_ids:
+            if dedupe_id in seen_ids:
                 continue
 
-            seen_ids.add(market_id)
+            seen_ids.add(dedupe_id)
             results.append(item)
 
         time.sleep(0.25)
@@ -1011,12 +1040,12 @@ def fetch_polymarket_markets(markets_config: List[Dict[str, Any]]) -> List[Dict[
     search_items = fetch_polymarket_search_markets(markets_config)
 
     for item in search_items:
-        market_id = item["market_id"]
+        dedupe_id = f"{item['market_id']}:{item['direction']}"
 
-        if market_id in seen_ids:
+        if dedupe_id in seen_ids:
             continue
 
-        seen_ids.add(market_id)
+        seen_ids.add(dedupe_id)
         results.append(item)
 
     return results
@@ -1093,8 +1122,8 @@ def aggregate_items(items: List[Dict[str, Any]]) -> Dict[Tuple[str, str, str], D
 
     for item in items:
         key = (
-            item["source"],
             item["market_key"],
+            item["direction"],
             item["line_label"],
         )
         grouped.setdefault(key, []).append(item)
@@ -1111,33 +1140,17 @@ def aggregate_items(items: List[Dict[str, Any]]) -> Dict[Tuple[str, str, str], D
         if not probabilities:
             continue
 
-        total_weight = sum(
-            max(float(r.get("volume") or 0), 0)
-            for r in rows
-        )
-
-        if total_weight > 0:
-            probability = sum(
-                float(r.get("probability") or 0) * max(float(r.get("volume") or 0), 0)
-                for r in rows
-            ) / total_weight
-        else:
-            probability = statistics.mean(probabilities)
-
-        representative = max(
-            rows,
-            key=lambda r: float(r.get("volume") or 0)
-        )
+        probability = statistics.mean(probabilities)
+        representative = rows[0]
 
         aggregated[key] = {
-            "source": key[0],
-            "market_key": key[1],
+            "market_key": key[0],
+            "direction": key[1],
             "line_label": key[2],
             "line_value": representative.get("line_value"),
             "probability": probability,
+            "probabilities": probabilities,
             "count": len(rows),
-            "volume": sum(float(r.get("volume") or 0) for r in rows),
-            "liquidity": sum(float(r.get("liquidity") or 0) for r in rows),
             "title": representative.get("title") or "",
         }
 
@@ -1145,56 +1158,294 @@ def aggregate_items(items: List[Dict[str, Any]]) -> Dict[Tuple[str, str, str], D
 
 
 # ============================================================
+# Thickness score
+# ============================================================
+
+def thickness_score(
+    count: int,
+    total_m: int,
+    probabilities: List[float],
+    line_value: Optional[float],
+    center: float,
+    grid_step: int,
+) -> float:
+    """
+    厚みスコア。
+    これは「確率の高さ」ではなく、「市場データの厚み」を表す。
+    vol/liqは現状安定しないので使わない。
+
+    要素:
+    - Coverage: 同じラインの市場数
+    - MarketShare: 銘柄内でそのラインが占める市場数比率
+    - Consistency: 確率の揃い方
+    - Relevance: 現在価格との距離
+    """
+    m = max(int(count or 1), 1)
+
+    coverage = 1 - math.exp(-m / 5)
+
+    market_share = math.sqrt(m / total_m) if total_m > 0 else 0
+
+    if len(probabilities) >= 2:
+        std = statistics.pstdev(probabilities)
+        consistency = math.exp(-std / 0.15)
+    else:
+        consistency = 0.45
+
+    if line_value is not None and grid_step > 0:
+        distance_steps = abs(float(line_value) - float(center)) / float(grid_step)
+    else:
+        distance_steps = 999
+
+    relevance = math.exp(-distance_steps / 8)
+
+    score = 100 * (
+        0.35 * coverage
+        + 0.25 * market_share
+        + 0.25 * consistency
+        + 0.15 * relevance
+    )
+
+    return max(0, min(100, score))
+
+
+def thickness_label(score: float) -> str:
+    if score >= 70:
+        return "厚"
+    if score >= 40:
+        return "中"
+    return "薄"
+
+
+# ============================================================
 # Rendering
 # ============================================================
 
-def bar_for_probability(p: Optional[float]) -> str:
-    if p is None:
-        return ""
-
-    bar_count = int(round(p * 10))
-    bar_count = max(0, min(10, bar_count))
-    return "█" * bar_count + "░" * (10 - bar_count)
+def sort_rows_by_line(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return sorted(
+        rows,
+        key=lambda r: r.get("line_value") if r.get("line_value") is not None else 999999999
+    )
 
 
-def line_key(value: float, market: Dict[str, Any]) -> int:
-    step = int(market.get("grid_step") or 1)
-
-    if step >= 100:
-        return int(round(value / step) * step)
-
-    return int(round(value))
+def rows_total_count(rows: List[Dict[str, Any]]) -> int:
+    return sum(int(r.get("count") or 1) for r in rows)
 
 
-def build_line_map(rows: List[Dict[str, Any]], market: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
-    result: Dict[int, Dict[str, Any]] = {}
+def filter_rows_by_center(rows: List[Dict[str, Any]], center: float, direction: str) -> List[Dict[str, Any]]:
+    filtered = []
 
     for row in rows:
-        value = row.get("line_value")
+        line_value = row.get("line_value")
 
-        if value is None:
+        if line_value is None:
             continue
 
-        k = line_key(value, market)
+        if direction == "down":
+            if line_value <= center:
+                filtered.append(row)
 
-        if k not in result:
-            result[k] = row
+        elif direction == "over":
+            if line_value >= center:
+                filtered.append(row)
+
         else:
-            if float(row.get("volume") or 0) > float(result[k].get("volume") or 0):
-                result[k] = row
+            filtered.append(row)
 
-    return result
+    filtered = sort_rows_by_line(filtered)
+
+    if len(filtered) <= MAX_LINES_PER_DIRECTION:
+        return filtered
+
+    # 多すぎる場合は現在価格に近い10本を残す
+    closest = sorted(
+        filtered,
+        key=lambda r: abs(float(r.get("line_value") or 0) - float(center))
+    )[:MAX_LINES_PER_DIRECTION]
+
+    return sort_rows_by_line(closest)
 
 
-def build_grid_values(center: float, market: Dict[str, Any]) -> List[float]:
-    step = int(market.get("grid_step") or 1)
+def direction_suffix(direction: str) -> str:
+    if direction == "down":
+        return "以下"
+    if direction == "over":
+        return "以上"
+    return ""
 
-    values = []
 
-    for i in range(-GRID_HALF_STEPS, GRID_HALF_STEPS + 1):
-        values.append(center + i * step)
+def direction_icon(direction: str) -> str:
+    if direction == "down":
+        return "🔴"
+    if direction == "over":
+        return "🟢"
+    return "⚪"
 
-    return values
+
+def render_line(
+    row: Dict[str, Any],
+    total_m: int,
+    center: float,
+    market: Dict[str, Any],
+    direction: str,
+    with_icon: bool = False,
+) -> str:
+    label = row.get("line_label") or ""
+    suffix = direction_suffix(direction)
+    p = row.get("probability")
+    count = int(row.get("count") or 1)
+    probabilities = row.get("probabilities") or []
+    grid_step = int(market.get("grid_step") or 1)
+
+    score = thickness_score(
+        count=count,
+        total_m=total_m,
+        probabilities=probabilities,
+        line_value=row.get("line_value"),
+        center=center,
+        grid_step=grid_step,
+    )
+
+    thick = thickness_label(score)
+    display_label = f"{label}{suffix}"
+    icon = f"{direction_icon(direction)} " if with_icon else ""
+
+    return f"{icon}`{display_label:<10}` `{format_pct(p):>6}` `厚み:{thick}`"
+
+
+def render_prediction_rows(
+    rows: List[Dict[str, Any]],
+    total_m: int,
+    center: float,
+    market: Dict[str, Any],
+    direction: str,
+) -> List[str]:
+    lines = []
+
+    for row in sort_rows_by_line(rows):
+        lines.append(render_line(row, total_m, center, market, direction, with_icon=False))
+
+    return lines
+
+
+def judge_market_bias(down_rows: List[Dict[str, Any]], over_rows: List[Dict[str, Any]]) -> str:
+    """
+    簡易判定。
+    中心付近のOver/Downの平均を見て、方向感を出す。
+    """
+    if not down_rows and not over_rows:
+        return "判定不能"
+
+    down_probs = [
+        safe_float(r.get("probability"))
+        for r in down_rows
+        if safe_float(r.get("probability")) is not None
+    ]
+    over_probs = [
+        safe_float(r.get("probability"))
+        for r in over_rows
+        if safe_float(r.get("probability")) is not None
+    ]
+
+    down_avg = statistics.mean(down_probs) if down_probs else None
+    over_avg = statistics.mean(over_probs) if over_probs else None
+
+    if over_avg is not None and down_avg is not None:
+        diff = over_avg - down_avg
+        if diff >= 0.15:
+            return "上方向が強め"
+        if diff <= -0.15:
+            return "下方向が強め"
+        if diff >= 0.07:
+            return "中立〜やや上"
+        if diff <= -0.07:
+            return "中立〜やや下"
+        return "中立"
+
+    if over_avg is not None:
+        if over_avg >= 0.6:
+            return "上方向が強め"
+        if over_avg >= 0.45:
+            return "中立〜やや上"
+        return "中立"
+
+    if down_avg is not None:
+        if down_avg >= 0.6:
+            return "下方向が強め"
+        if down_avg >= 0.45:
+            return "中立〜やや下"
+        return "中立"
+
+    return "判定不能"
+
+
+def build_focus_lines(
+    down_rows: List[Dict[str, Any]],
+    over_rows: List[Dict[str, Any]],
+    total_m: int,
+    center: float,
+    market: Dict[str, Any],
+) -> List[str]:
+    """
+    注目ライン:
+    - 確率が50%に近いライン
+    - 厚みがあるライン
+    - 現在価格に近いライン
+    をバランスよく上位表示。
+    """
+    candidates = []
+
+    for direction, rows in [("down", down_rows), ("over", over_rows)]:
+        for row in rows:
+            p = safe_float(row.get("probability"))
+            line_value = safe_float(row.get("line_value"))
+
+            if p is None or line_value is None:
+                continue
+
+            grid_step = int(market.get("grid_step") or 1)
+            count = int(row.get("count") or 1)
+            probabilities = row.get("probabilities") or []
+
+            thick_score = thickness_score(
+                count=count,
+                total_m=total_m,
+                probabilities=probabilities,
+                line_value=line_value,
+                center=center,
+                grid_step=grid_step,
+            )
+
+            distance = abs(line_value - center) / grid_step if grid_step > 0 else 999
+            battleground = 1 - abs(p - 0.5) * 2
+            distance_score = math.exp(-distance / 5)
+
+            focus_score = (
+                0.45 * battleground
+                + 0.35 * (thick_score / 100)
+                + 0.20 * distance_score
+            )
+
+            candidates.append((focus_score, direction, row))
+
+    candidates = sorted(candidates, key=lambda x: x[0], reverse=True)
+
+    lines = []
+    used = set()
+
+    for _, direction, row in candidates:
+        key = (direction, row.get("line_label"))
+
+        if key in used:
+            continue
+
+        used.add(key)
+        lines.append(render_line(row, total_m, center, market, direction, with_icon=True))
+
+        if len(lines) >= MAX_FOCUS_LINES:
+            break
+
+    return lines
 
 
 def build_group_block(market: Dict[str, Any], rows: List[Dict[str, Any]]) -> str:
@@ -1203,49 +1454,58 @@ def build_group_block(market: Dict[str, Any], rows: List[Dict[str, Any]]) -> str
     if center is None:
         return f"**{market.get('display', market.get('key'))}**\n`no center found`"
 
-    line_map = build_line_map(rows, market)
+    display = market.get("display") or market.get("key")
 
-    active_rows = sorted(
-        rows,
-        key=lambda r: abs((r.get("probability") or 0) - 0.5)
-    )[:5]
+    raw_down_rows = [r for r in rows if r.get("direction") == "down"]
+    raw_over_rows = [r for r in rows if r.get("direction") == "over"]
+    raw_unknown_rows = [r for r in rows if r.get("direction") == "unknown"]
 
-    active_rows = sorted(
-        active_rows,
-        key=lambda r: r.get("line_value") if r.get("line_value") is not None else 999999999
-    )
+    down_rows = filter_rows_by_center(raw_down_rows, center, "down")
+    over_rows = filter_rows_by_center(raw_over_rows, center, "over")
+    unknown_rows = sort_rows_by_line(raw_unknown_rows)
+
+    visible_rows = down_rows + over_rows + unknown_rows
+    total_m = rows_total_count(visible_rows)
+
+    bias = judge_market_bias(down_rows, over_rows)
+    focus_lines = build_focus_lines(down_rows, over_rows, total_m, center, market)
 
     lines = []
 
-    display = market.get("display") or market.get("key")
-
     lines.append(f"**{display}**")
-    lines.append(f"`Center {format_line_label(center, market)} / {center_source}`")
-
+    lines.append(f"`現在価格: {format_line_label(center, market)} / {center_source}`")
+    lines.append(f"`市場感: {bias}`")
     lines.append("")
-    lines.append("Grid")
 
-    for value in build_grid_values(center, market):
-        k = line_key(value, market)
-        label = format_line_label(value, market)
-        row = line_map.get(k)
-
-        if row:
-            p = row.get("probability")
-            lines.append(f"`{label:<8}` {bar_for_probability(p)} `{format_pct(p)}`")
-        else:
-            lines.append(f"`{label:<8}`")
-
-    lines.append("")
-    lines.append("Active")
-
-    if not active_rows:
-        lines.append("`none`")
+    lines.append("🔥 **注目ライン**")
+    if focus_lines:
+        lines.extend(focus_lines)
     else:
-        for row in active_rows:
-            label = row.get("line_label") or ""
-            p = row.get("probability")
-            lines.append(f"`{label:<8}` {bar_for_probability(p)} `{format_pct(p)}`")
+        lines.append("`なし`")
+
+    lines.append("")
+    lines.append("🔴 **下方向**")
+    if down_rows:
+        lines.extend(render_prediction_rows(down_rows, total_m, center, market, "down"))
+    else:
+        lines.append("`なし`")
+
+    lines.append("")
+    lines.append("🟢 **上方向**")
+    if over_rows:
+        lines.extend(render_prediction_rows(over_rows, total_m, center, market, "over"))
+    else:
+        lines.append("`なし`")
+
+    if unknown_rows:
+        lines.append("")
+        lines.append("⚪ **方向不明**")
+        lines.extend(render_prediction_rows(unknown_rows, total_m, center, market, "unknown"))
+
+    lines.append("")
+    lines.append("`注:`")
+    lines.append("`% = 予測市場のYES価格ベースの市場確率`")
+    lines.append("`厚み = 市場データの強さ。確率の高さとは別`")
 
     return "\n".join(lines)
 
@@ -1319,7 +1579,9 @@ def run_once() -> None:
 
     for item in items:
         key = item["market_key"]
-        counts[key] = counts.get(key, 0) + 1
+        direction = item.get("direction", "unknown")
+        count_key = f"{key}:{direction}"
+        counts[count_key] = counts.get(count_key, 0) + 1
 
     print("[INFO] Counts:", counts)
 
