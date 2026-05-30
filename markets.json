@@ -5,9 +5,19 @@
       "display": "💧Oil - WTI",
       "category": "oil",
       "enabled": true,
-      "center_type": "manual",
+      "center_type": "ostium",
       "manual_center": 86.8552,
       "binance_symbol": "",
+      "hyperliquid_coin": "",
+      "ostium_asset": "WTIUSD",
+      "ostium_asset_candidates": [
+        "WTIUSD",
+        "WTI/USD",
+        "WTI",
+        "USOIL",
+        "CLUSD",
+        "CL/USD"
+      ],
       "grid_step": 1,
       "range_pct": 0.1,
       "search_queries": [
@@ -33,9 +43,17 @@
       "display": "🥇Gold - XAU",
       "category": "commodity",
       "enabled": true,
-      "center_type": "manual",
-      "manual_center": 4540.52,
+      "center_type": "ostium",
+      "manual_center": 4550,
       "binance_symbol": "",
+      "hyperliquid_coin": "",
+      "ostium_asset": "XAUUSD",
+      "ostium_asset_candidates": [
+        "XAUUSD",
+        "XAU/USD",
+        "XAU",
+        "GOLD"
+      ],
       "grid_step": 50,
       "range_pct": 0.12,
       "search_queries": [
@@ -69,9 +87,12 @@
       "display": "💰BTC",
       "category": "crypto",
       "enabled": true,
-      "center_type": "binance",
-      "manual_center": null,
+      "center_type": "hyperliquid",
+      "manual_center": 73500,
       "binance_symbol": "BTCUSDT",
+      "hyperliquid_coin": "BTC",
+      "ostium_asset": "",
+      "ostium_asset_candidates": [],
       "grid_step": 500,
       "range_pct": 0.1,
       "search_queries": [
@@ -87,7 +108,9 @@
       ],
       "exclude": [
         "gold",
-        "silver"
+        "silver",
+        "ethereum",
+        "eth"
       ]
     }
   ]
