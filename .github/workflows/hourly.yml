@@ -1,8 +1,8 @@
-name: Hourly Market Radar
+name: Daily Market Radar
 
 on:
   schedule:
-    - cron: "7 * * * *"
+    - cron: "7 12 * * *"
   workflow_dispatch:
 
 jobs:
