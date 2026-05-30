@@ -17,7 +17,10 @@ from config import (
     POLYMARKET_GAMMA_MARKETS_URL,
     POLYMARKET_SEARCH_URL,
     KALSHI_MARKETS_URL,
-    BTC_SPOT_PRICE_URL,
+    BINANCE_SPOT_PRICE_URL,
+    OSTIUM_LATEST_PRICES_URL,
+    OSTIUM_LATEST_PRICE_URL,
+    HYPERLIQUID_INFO_URL,
     USER_AGENT,
     MARKETS_JSON_PATH,
     POLYMARKET_LIMIT,
@@ -31,6 +34,8 @@ from config import (
 load_dotenv()
 
 BINANCE_PRICE_CACHE: Dict[str, float] = {}
+HYPERLIQUID_MIDS_CACHE: Optional[Dict[str, Any]] = None
+OSTIUM_LATEST_PRICES_CACHE: Optional[Any] = None
 
 
 # ============================================================
@@ -71,6 +76,10 @@ def safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
 
 def normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+
+def normalize_symbol(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (text or "").lower())
 
 
 def format_pct(p: Optional[float]) -> str:
@@ -115,6 +124,18 @@ def http_get_json(url: str, params: Optional[Dict[str, Any]] = None, timeout: in
     }
 
     response = requests.get(url, params=params, headers=headers, timeout=timeout)
+    response.raise_for_status()
+    return response.json()
+
+
+def http_post_json(url: str, payload: Dict[str, Any], timeout: int = 25) -> Any:
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+
+    response = requests.post(url, json=payload, headers=headers, timeout=timeout)
     response.raise_for_status()
     return response.json()
 
@@ -200,6 +221,63 @@ def get_all_search_queries(markets: List[Dict[str, Any]]) -> List[str]:
 # Center prices
 # ============================================================
 
+def normalize_possible_center_price(raw_price: Any, market: Dict[str, Any]) -> Optional[float]:
+    """
+    Ostiumなどの価格がスケール付き整数で返った場合も拾えるようにする。
+    manual_centerの近くを優先する。
+    """
+    p = safe_float(raw_price)
+
+    if p is None or p <= 0:
+        return None
+
+    manual = safe_float(market.get("manual_center"))
+    range_pct = safe_float(market.get("range_pct"), 0.1) or 0.1
+
+    candidates = [
+        p,
+        p / 10,
+        p / 100,
+        p / 1_000,
+        p / 10_000,
+        p / 100_000,
+        p / 1_000_000,
+        p / 10_000_000,
+        p / 100_000_000,
+        p / 1_000_000_000,
+        p / 10_000_000_000,
+    ]
+
+    if manual is not None and manual > 0:
+        low = manual * (1 - max(range_pct, 0.25))
+        high = manual * (1 + max(range_pct, 0.25))
+
+        for x in candidates:
+            if low <= x <= high:
+                return x
+
+    # fallback ranges
+    key = str(market.get("key", "")).lower()
+    category = str(market.get("category", "")).lower()
+
+    if "btc" in key:
+        for x in candidates:
+            if 10_000 <= x <= 1_000_000:
+                return x
+
+    if "gold" in key or "xau" in key:
+        for x in candidates:
+            if 1_000 <= x <= 10_000:
+                return x
+
+    if "oil" in key or category == "oil":
+        for x in candidates:
+            if 40 <= x <= 200:
+                return x
+
+    return None
+
+
 def fetch_binance_price(symbol: str) -> Optional[float]:
     symbol = (symbol or "").strip().upper()
 
@@ -211,7 +289,7 @@ def fetch_binance_price(symbol: str) -> Optional[float]:
 
     try:
         data = http_get_json(
-            BTC_SPOT_PRICE_URL,
+            BINANCE_SPOT_PRICE_URL,
             params={"symbol": symbol},
             timeout=15,
         )
@@ -228,9 +306,262 @@ def fetch_binance_price(symbol: str) -> Optional[float]:
     return None
 
 
+def fetch_hyperliquid_all_mids() -> Optional[Dict[str, Any]]:
+    global HYPERLIQUID_MIDS_CACHE
+
+    if HYPERLIQUID_MIDS_CACHE is not None:
+        return HYPERLIQUID_MIDS_CACHE
+
+    try:
+        data = http_post_json(
+            HYPERLIQUID_INFO_URL,
+            payload={"type": "allMids"},
+            timeout=20,
+        )
+
+        if isinstance(data, dict):
+            HYPERLIQUID_MIDS_CACHE = data
+            return data
+
+    except Exception as e:
+        print("[WARN] Hyperliquid allMids fetch failed:", e)
+
+    return None
+
+
+def fetch_hyperliquid_price(coin: str) -> Optional[float]:
+    coin = (coin or "").strip().upper()
+
+    if not coin:
+        return None
+
+    data = fetch_hyperliquid_all_mids()
+
+    if not isinstance(data, dict):
+        return None
+
+    # HyperliquidはBTC, ETHなどのキーで返る想定
+    candidates = [
+        coin,
+        coin.upper(),
+        coin.lower(),
+    ]
+
+    for key in candidates:
+        if key in data:
+            price = safe_float(data.get(key))
+            if price is not None and price > 0:
+                print(f"[INFO] Hyperliquid price {coin}: {price}")
+                return price
+
+    # 念のため大小文字無視で探す
+    for k, v in data.items():
+        if str(k).upper() == coin:
+            price = safe_float(v)
+            if price is not None and price > 0:
+                print(f"[INFO] Hyperliquid price {coin}: {price}")
+                return price
+
+    print(f"[WARN] Hyperliquid coin not found: {coin}")
+    return None
+
+
+def fetch_ostium_latest_prices() -> Optional[Any]:
+    global OSTIUM_LATEST_PRICES_CACHE
+
+    if OSTIUM_LATEST_PRICES_CACHE is not None:
+        return OSTIUM_LATEST_PRICES_CACHE
+
+    try:
+        data = http_get_json(OSTIUM_LATEST_PRICES_URL, timeout=20)
+        OSTIUM_LATEST_PRICES_CACHE = data
+        return data
+    except Exception as e:
+        print("[WARN] Ostium latest-prices fetch failed:", e)
+        return None
+
+
+def extract_price_from_dict(obj: Dict[str, Any], market: Dict[str, Any]) -> Optional[float]:
+    price_keys = [
+        "price",
+        "value",
+        "last",
+        "mark",
+        "mid",
+        "indexPrice",
+        "index_price",
+        "oraclePrice",
+        "oracle_price",
+        "answer",
+        "bid",
+        "ask",
+    ]
+
+    for key in price_keys:
+        if key in obj:
+            px = normalize_possible_center_price(obj.get(key), market)
+            if px is not None:
+                return px
+
+    return None
+
+
+def dict_text_blob(obj: Dict[str, Any]) -> str:
+    parts = []
+
+    for key in [
+        "asset",
+        "symbol",
+        "ticker",
+        "name",
+        "pair",
+        "feed",
+        "market",
+        "description",
+        "id",
+    ]:
+        if key in obj:
+            parts.append(str(obj.get(key)))
+
+    return " ".join(parts)
+
+
+def walk_ostium_for_asset(data: Any, asset_names: List[str], market: Dict[str, Any]) -> Optional[Tuple[float, str]]:
+    normalized_targets = [normalize_symbol(x) for x in asset_names if x]
+    found: List[Tuple[float, str]] = []
+
+    def walk(obj: Any, path: str = "") -> None:
+        if isinstance(obj, list):
+            for x in obj:
+                walk(x, path)
+            return
+
+        if isinstance(obj, dict):
+            blob = f"{path} {dict_text_blob(obj)}"
+            normalized_blob = normalize_symbol(blob)
+
+            matched = any(t and t in normalized_blob for t in normalized_targets)
+
+            if matched:
+                px = extract_price_from_dict(obj, market)
+                if px is not None:
+                    found.append((px, blob[:120]))
+
+            for k, v in obj.items():
+                walk(v, f"{path} {k}")
+
+            return
+
+        # dict/list以外は無視
+
+    walk(data)
+
+    if not found:
+        return None
+
+    return found[0]
+
+
+def fetch_ostium_individual_price(asset: str, market: Dict[str, Any]) -> Optional[float]:
+    asset = (asset or "").strip()
+
+    if not asset:
+        return None
+
+    try:
+        data = http_get_json(
+            OSTIUM_LATEST_PRICE_URL,
+            params={"asset": asset},
+            timeout=15,
+        )
+
+        print(f"[INFO] Ostium individual response asset={asset}: {str(data)[:220]}")
+
+        if isinstance(data, dict):
+            px = extract_price_from_dict(data, market)
+            if px is not None:
+                return px
+
+            found = walk_ostium_for_asset(data, [asset], market)
+            if found:
+                return found[0]
+
+        if isinstance(data, list):
+            found = walk_ostium_for_asset(data, [asset], market)
+            if found:
+                return found[0]
+
+        px = normalize_possible_center_price(data, market)
+        if px is not None:
+            return px
+
+    except Exception as e:
+        print(f"[WARN] Ostium individual fetch failed asset={asset}: {e}")
+
+    return None
+
+
+def fetch_ostium_price(market: Dict[str, Any]) -> Optional[float]:
+    candidates = []
+
+    primary = market.get("ostium_asset")
+    if primary:
+        candidates.append(str(primary))
+
+    for x in market.get("ostium_asset_candidates", []) or []:
+        s = str(x).strip()
+        if s and s not in candidates:
+            candidates.append(s)
+
+    # 1. 個別APIを候補順に試す
+    for asset in candidates:
+        price = fetch_ostium_individual_price(asset, market)
+
+        if price is not None:
+            print(f"[INFO] Ostium center {market.get('key')}: {price} / asset={asset}")
+            return price
+
+    # 2. latest-prices全体から探す
+    data = fetch_ostium_latest_prices()
+
+    if data is None:
+        return None
+
+    found = walk_ostium_for_asset(data, candidates, market)
+
+    if found:
+        price, matched = found
+        print(f"[INFO] Ostium latest-prices center {market.get('key')}: {price} / matched={matched}")
+        return price
+
+    print(f"[WARN] Ostium price not found for {market.get('key')} candidates={candidates}")
+    return None
+
+
 def choose_center(market: Dict[str, Any], rows: List[Dict[str, Any]]) -> Tuple[Optional[float], str]:
     center_type = market.get("center_type", "manual")
     step = int(market.get("grid_step") or 1)
+
+    if center_type == "ostium":
+        price = fetch_ostium_price(market)
+        if price is not None:
+            return round_to_step(price, step), "Ostium"
+
+        manual = safe_float(market.get("manual_center"))
+        if manual is not None and manual > 0:
+            print(f"[WARN] Using manual fallback for {market.get('key')}")
+            return round_to_step(manual, step), "Manual fallback"
+
+    if center_type == "hyperliquid":
+        coin = market.get("hyperliquid_coin", "")
+        price = fetch_hyperliquid_price(coin)
+        if price is not None:
+            return round_to_step(price, step), "Hyperliquid"
+
+        manual = safe_float(market.get("manual_center"))
+        if manual is not None and manual > 0:
+            print(f"[WARN] Using manual fallback for {market.get('key')}")
+            return round_to_step(manual, step), "Manual fallback"
 
     if center_type == "manual":
         manual = safe_float(market.get("manual_center"))
@@ -245,6 +576,10 @@ def choose_center(market: Dict[str, Any], rows: List[Dict[str, Any]]) -> Tuple[O
         if price is not None:
             return round_to_step(price, step), "Binance"
 
+        manual = safe_float(market.get("manual_center"))
+        if manual is not None and manual > 0:
+            return round_to_step(manual, step), "Manual fallback"
+
     if rows:
         battleground = min(
             rows,
@@ -256,14 +591,24 @@ def choose_center(market: Dict[str, Any], rows: List[Dict[str, Any]]) -> Tuple[O
 
 
 def get_reference_center_for_filter(market: Dict[str, Any]) -> Optional[float]:
+    """
+    価格ライン抽出時のフィルター用。
+    APIは重いので、manual_centerを優先して十分。
+    """
+    manual = safe_float(market.get("manual_center"))
+    if manual is not None and manual > 0:
+        return manual
+
     center_type = market.get("center_type", "manual")
 
-    if center_type == "manual":
-        return safe_float(market.get("manual_center"))
+    if center_type == "hyperliquid":
+        return fetch_hyperliquid_price(market.get("hyperliquid_coin", ""))
 
     if center_type == "binance":
-        symbol = market.get("binance_symbol", "")
-        return fetch_binance_price(symbol)
+        return fetch_binance_price(market.get("binance_symbol", ""))
+
+    if center_type == "ostium":
+        return fetch_ostium_price(market)
 
     return None
 
@@ -327,7 +672,6 @@ def format_line_label(value: float, market: Dict[str, Any]) -> str:
 def extract_line(title: str, market: Dict[str, Any]) -> Tuple[Optional[str], Optional[float]]:
     text = title or ""
     step = int(market.get("grid_step") or 1)
-    center_type = market.get("center_type", "manual")
     range_pct = safe_float(market.get("range_pct"), 0.1) or 0.1
 
     money_candidates: List[float] = []
@@ -369,29 +713,16 @@ def extract_line(title: str, market: Dict[str, Any]) -> Tuple[Optional[str], Opt
         if value <= 0:
             continue
 
-        # Binance中心の銘柄は現在価格±range_pctに制限
-        if center_type == "binance":
-            if ref_center is not None:
-                low = ref_center * (1 - range_pct)
-                high = ref_center * (1 + range_pct)
-
-                if not (low <= value <= high):
-                    continue
-
-                if not is_near_step(value, step):
-                    continue
-
-        # Goldなど大きなmanual中心価格の銘柄は、中心価格周辺だけ拾う
-        # これで $1.5 / $2.5 みたいな変なラインを除外する
-        if center_type == "manual" and ref_center is not None and ref_center >= 1000:
+        # manual_centerがある銘柄は中心周辺だけ拾う
+        if ref_center is not None and ref_center > 0:
             low = ref_center * (1 - range_pct)
             high = ref_center * (1 + range_pct)
 
             if not (low <= value <= high):
                 continue
 
-            # Goldは50刻みなどに寄せたい
             tolerance = max(1.0, step * 0.12)
+
             if not is_near_step(value, step, tolerance=tolerance):
                 continue
 
@@ -890,16 +1221,6 @@ def build_group_block(market: Dict[str, Any], rows: List[Dict[str, Any]]) -> str
 
     lines.append(f"**{display}**")
     lines.append(f"`Center {format_line_label(center, market)} / {center_source}`")
-
-    if market.get("center_type") == "binance":
-        symbol = market.get("binance_symbol", "")
-        spot = fetch_binance_price(symbol)
-
-        if spot is not None:
-            range_pct = safe_float(market.get("range_pct"), 0.1) or 0.1
-            lower = spot * (1 - range_pct)
-            upper = spot * (1 + range_pct)
-            lines.append(f"`Spot ${spot:,.0f} / Range ${lower:,.0f}〜${upper:,.0f}`")
 
     lines.append("")
     lines.append("Grid")
