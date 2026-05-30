@@ -17,9 +17,14 @@ POLYMARKET_SEARCH_URL = "https://gamma-api.polymarket.com/public-search"
 
 KALSHI_MARKETS_URL = "https://external-api.kalshi.com/trade-api/v2/markets"
 
-BTC_SPOT_PRICE_URL = "https://api.binance.com/api/v3/ticker/price"
+BINANCE_SPOT_PRICE_URL = "https://api.binance.com/api/v3/ticker/price"
 
-USER_AGENT = "MarketLineRadarGitHubBot/1.0"
+OSTIUM_LATEST_PRICES_URL = "https://metadata-backend.ostium.io/PricePublish/latest-prices"
+OSTIUM_LATEST_PRICE_URL = "https://metadata-backend.ostium.io/PricePublish/latest-price"
+
+HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info"
+
+USER_AGENT = "MarketLineRadarGitHubBot/1.1"
 
 # =========================
 # Files
