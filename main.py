@@ -36,7 +36,7 @@ BINANCE_PRICE_CACHE: Dict[str, float] = {}
 HYPERLIQUID_MIDS_CACHE: Optional[Dict[str, Any]] = None
 OSTIUM_LATEST_PRICES_CACHE: Optional[Any] = None
 
-MAX_LINES_PER_DIRECTION = 10
+MAX_LINES_PER_SIDE = 10
 MAX_FOCUS_LINES = 3
 
 
@@ -1169,21 +1169,9 @@ def thickness_score(
     center: float,
     grid_step: int,
 ) -> float:
-    """
-    厚みスコア。
-    これは「確率の高さ」ではなく、「市場データの厚み」を表す。
-    vol/liqは現状安定しないので使わない。
-
-    要素:
-    - Coverage: 同じラインの市場数
-    - MarketShare: 銘柄内でそのラインが占める市場数比率
-    - Consistency: 確率の揃い方
-    - Relevance: 現在価格との距離
-    """
     m = max(int(count or 1), 1)
 
     coverage = 1 - math.exp(-m / 5)
-
     market_share = math.sqrt(m / total_m) if total_m > 0 else 0
 
     if len(probabilities) >= 2:
@@ -1221,6 +1209,15 @@ def thickness_label(score: float) -> str:
 # Rendering
 # ============================================================
 
+def bar_for_probability(p: Optional[float]) -> str:
+    if p is None:
+        return ""
+
+    bar_count = int(round(p * 10))
+    bar_count = max(0, min(10, bar_count))
+    return "█" * bar_count + "░" * (10 - bar_count)
+
+
 def sort_rows_by_line(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return sorted(
         rows,
@@ -1232,46 +1229,29 @@ def rows_total_count(rows: List[Dict[str, Any]]) -> int:
     return sum(int(r.get("count") or 1) for r in rows)
 
 
-def filter_rows_by_center(rows: List[Dict[str, Any]], center: float, direction: str) -> List[Dict[str, Any]]:
-    filtered = []
+def prepare_grid_rows(rows: List[Dict[str, Any]], center: float) -> List[Dict[str, Any]]:
+    """
+    価格ラインを一本のGridとして表示する。
+    down/overを分けすぎず、現在価格より下側・上側から近いものを残す。
+    """
+    valid = [r for r in rows if r.get("line_value") is not None]
+    valid = sort_rows_by_line(valid)
 
-    for row in rows:
-        line_value = row.get("line_value")
+    lower_or_equal = [r for r in valid if float(r.get("line_value")) <= float(center)]
+    upper = [r for r in valid if float(r.get("line_value")) > float(center)]
 
-        if line_value is None:
-            continue
+    lower_keep = sorted(
+        lower_or_equal,
+        key=lambda r: abs(float(r.get("line_value")) - float(center))
+    )[:MAX_LINES_PER_SIDE]
 
-        if direction == "down":
-            if line_value <= center:
-                filtered.append(row)
+    upper_keep = sorted(
+        upper,
+        key=lambda r: abs(float(r.get("line_value")) - float(center))
+    )[:MAX_LINES_PER_SIDE]
 
-        elif direction == "over":
-            if line_value >= center:
-                filtered.append(row)
-
-        else:
-            filtered.append(row)
-
-    filtered = sort_rows_by_line(filtered)
-
-    if len(filtered) <= MAX_LINES_PER_DIRECTION:
-        return filtered
-
-    # 多すぎる場合は現在価格に近い10本を残す
-    closest = sorted(
-        filtered,
-        key=lambda r: abs(float(r.get("line_value") or 0) - float(center))
-    )[:MAX_LINES_PER_DIRECTION]
-
-    return sort_rows_by_line(closest)
-
-
-def direction_suffix(direction: str) -> str:
-    if direction == "down":
-        return "以下"
-    if direction == "over":
-        return "以上"
-    return ""
+    combined = lower_keep + upper_keep
+    return sort_rows_by_line(combined)
 
 
 def direction_icon(direction: str) -> str:
@@ -1282,16 +1262,14 @@ def direction_icon(direction: str) -> str:
     return "⚪"
 
 
-def render_line(
+def render_row(
     row: Dict[str, Any],
     total_m: int,
     center: float,
     market: Dict[str, Any],
-    direction: str,
     with_icon: bool = False,
 ) -> str:
     label = row.get("line_label") or ""
-    suffix = direction_suffix(direction)
     p = row.get("probability")
     count = int(row.get("count") or 1)
     probabilities = row.get("probabilities") or []
@@ -1307,51 +1285,40 @@ def render_line(
     )
 
     thick = thickness_label(score)
-    display_label = f"{label}{suffix}"
-    icon = f"{direction_icon(direction)} " if with_icon else ""
+    icon = f"{direction_icon(row.get('direction'))} " if with_icon else ""
 
-    return f"{icon}`{display_label:<10}` `{format_pct(p):>6}` `厚み:{thick}`"
-
-
-def render_prediction_rows(
-    rows: List[Dict[str, Any]],
-    total_m: int,
-    center: float,
-    market: Dict[str, Any],
-    direction: str,
-) -> List[str]:
-    lines = []
-
-    for row in sort_rows_by_line(rows):
-        lines.append(render_line(row, total_m, center, market, direction, with_icon=False))
-
-    return lines
+    return f"{icon}`{label:<8}` {bar_for_probability(p)} `{format_pct(p):>6}` `{thick}`"
 
 
-def judge_market_bias(down_rows: List[Dict[str, Any]], over_rows: List[Dict[str, Any]]) -> str:
+def judge_market_bias(rows: List[Dict[str, Any]], center: float) -> str:
     """
     簡易判定。
-    中心付近のOver/Downの平均を見て、方向感を出す。
+    現価格より上側の確率平均と下側の確率平均を見る。
     """
-    if not down_rows and not over_rows:
+    if not rows:
         return "判定不能"
 
-    down_probs = [
-        safe_float(r.get("probability"))
-        for r in down_rows
-        if safe_float(r.get("probability")) is not None
-    ]
-    over_probs = [
-        safe_float(r.get("probability"))
-        for r in over_rows
-        if safe_float(r.get("probability")) is not None
-    ]
+    lower_probs = []
+    upper_probs = []
 
-    down_avg = statistics.mean(down_probs) if down_probs else None
-    over_avg = statistics.mean(over_probs) if over_probs else None
+    for r in rows:
+        p = safe_float(r.get("probability"))
+        line_value = safe_float(r.get("line_value"))
 
-    if over_avg is not None and down_avg is not None:
-        diff = over_avg - down_avg
+        if p is None or line_value is None:
+            continue
+
+        if line_value <= center:
+            lower_probs.append(p)
+        else:
+            upper_probs.append(p)
+
+    lower_avg = statistics.mean(lower_probs) if lower_probs else None
+    upper_avg = statistics.mean(upper_probs) if upper_probs else None
+
+    if upper_avg is not None and lower_avg is not None:
+        diff = upper_avg - lower_avg
+
         if diff >= 0.15:
             return "上方向が強め"
         if diff <= -0.15:
@@ -1362,17 +1329,17 @@ def judge_market_bias(down_rows: List[Dict[str, Any]], over_rows: List[Dict[str,
             return "中立〜やや下"
         return "中立"
 
-    if over_avg is not None:
-        if over_avg >= 0.6:
+    if upper_avg is not None:
+        if upper_avg >= 0.6:
             return "上方向が強め"
-        if over_avg >= 0.45:
+        if upper_avg >= 0.45:
             return "中立〜やや上"
         return "中立"
 
-    if down_avg is not None:
-        if down_avg >= 0.6:
+    if lower_avg is not None:
+        if lower_avg >= 0.6:
             return "下方向が強め"
-        if down_avg >= 0.45:
+        if lower_avg >= 0.45:
             return "中立〜やや下"
         return "中立"
 
@@ -1380,67 +1347,58 @@ def judge_market_bias(down_rows: List[Dict[str, Any]], over_rows: List[Dict[str,
 
 
 def build_focus_lines(
-    down_rows: List[Dict[str, Any]],
-    over_rows: List[Dict[str, Any]],
+    rows: List[Dict[str, Any]],
     total_m: int,
     center: float,
     market: Dict[str, Any],
 ) -> List[str]:
-    """
-    注目ライン:
-    - 確率が50%に近いライン
-    - 厚みがあるライン
-    - 現在価格に近いライン
-    をバランスよく上位表示。
-    """
     candidates = []
 
-    for direction, rows in [("down", down_rows), ("over", over_rows)]:
-        for row in rows:
-            p = safe_float(row.get("probability"))
-            line_value = safe_float(row.get("line_value"))
+    for row in rows:
+        p = safe_float(row.get("probability"))
+        line_value = safe_float(row.get("line_value"))
 
-            if p is None or line_value is None:
-                continue
+        if p is None or line_value is None:
+            continue
 
-            grid_step = int(market.get("grid_step") or 1)
-            count = int(row.get("count") or 1)
-            probabilities = row.get("probabilities") or []
+        grid_step = int(market.get("grid_step") or 1)
+        count = int(row.get("count") or 1)
+        probabilities = row.get("probabilities") or []
 
-            thick_score = thickness_score(
-                count=count,
-                total_m=total_m,
-                probabilities=probabilities,
-                line_value=line_value,
-                center=center,
-                grid_step=grid_step,
-            )
+        thick_score = thickness_score(
+            count=count,
+            total_m=total_m,
+            probabilities=probabilities,
+            line_value=line_value,
+            center=center,
+            grid_step=grid_step,
+        )
 
-            distance = abs(line_value - center) / grid_step if grid_step > 0 else 999
-            battleground = 1 - abs(p - 0.5) * 2
-            distance_score = math.exp(-distance / 5)
+        distance = abs(line_value - center) / grid_step if grid_step > 0 else 999
+        battleground = 1 - abs(p - 0.5) * 2
+        distance_score = math.exp(-distance / 5)
 
-            focus_score = (
-                0.45 * battleground
-                + 0.35 * (thick_score / 100)
-                + 0.20 * distance_score
-            )
+        focus_score = (
+            0.45 * battleground
+            + 0.35 * (thick_score / 100)
+            + 0.20 * distance_score
+        )
 
-            candidates.append((focus_score, direction, row))
+        candidates.append((focus_score, row))
 
     candidates = sorted(candidates, key=lambda x: x[0], reverse=True)
 
     lines = []
     used = set()
 
-    for _, direction, row in candidates:
-        key = (direction, row.get("line_label"))
+    for _, row in candidates:
+        key = (row.get("direction"), row.get("line_label"))
 
         if key in used:
             continue
 
         used.add(key)
-        lines.append(render_line(row, total_m, center, market, direction, with_icon=True))
+        lines.append(render_row(row, total_m, center, market, with_icon=True))
 
         if len(lines) >= MAX_FOCUS_LINES:
             break
@@ -1456,24 +1414,18 @@ def build_group_block(market: Dict[str, Any], rows: List[Dict[str, Any]]) -> str
 
     display = market.get("display") or market.get("key")
 
-    raw_down_rows = [r for r in rows if r.get("direction") == "down"]
-    raw_over_rows = [r for r in rows if r.get("direction") == "over"]
-    raw_unknown_rows = [r for r in rows if r.get("direction") == "unknown"]
+    grid_rows = prepare_grid_rows(rows, center)
+    total_m = rows_total_count(grid_rows)
 
-    down_rows = filter_rows_by_center(raw_down_rows, center, "down")
-    over_rows = filter_rows_by_center(raw_over_rows, center, "over")
-    unknown_rows = sort_rows_by_line(raw_unknown_rows)
+    bias = judge_market_bias(grid_rows, center)
+    focus_lines = build_focus_lines(grid_rows, total_m, center, market)
 
-    visible_rows = down_rows + over_rows + unknown_rows
-    total_m = rows_total_count(visible_rows)
-
-    bias = judge_market_bias(down_rows, over_rows)
-    focus_lines = build_focus_lines(down_rows, over_rows, total_m, center, market)
+    center_label = format_line_label(center, market)
 
     lines = []
 
     lines.append(f"**{display}**")
-    lines.append(f"`現在価格: {format_line_label(center, market)} / {center_source}`")
+    lines.append(f"`Center {center_label} / {center_source}`")
     lines.append(f"`市場感: {bias}`")
     lines.append("")
 
@@ -1484,28 +1436,29 @@ def build_group_block(market: Dict[str, Any], rows: List[Dict[str, Any]]) -> str
         lines.append("`なし`")
 
     lines.append("")
-    lines.append("🔴 **下方向**")
-    if down_rows:
-        lines.extend(render_prediction_rows(down_rows, total_m, center, market, "down"))
-    else:
-        lines.append("`なし`")
+    lines.append("**Grid**")
 
-    lines.append("")
-    lines.append("🟢 **上方向**")
-    if over_rows:
-        lines.extend(render_prediction_rows(over_rows, total_m, center, market, "over"))
-    else:
-        lines.append("`なし`")
+    inserted_center = False
 
-    if unknown_rows:
+    for row in grid_rows:
+        line_value = safe_float(row.get("line_value"))
+
+        if not inserted_center and line_value is not None and line_value > center:
+            lines.append("")
+            lines.append(f"🔴 **現在価格 {center_label}**")
+            lines.append("")
+            inserted_center = True
+
+        lines.append(render_row(row, total_m, center, market, with_icon=False))
+
+    if not inserted_center:
         lines.append("")
-        lines.append("⚪ **方向不明**")
-        lines.extend(render_prediction_rows(unknown_rows, total_m, center, market, "unknown"))
+        lines.append(f"🔴 **現在価格 {center_label}**")
 
     lines.append("")
     lines.append("`注:`")
     lines.append("`% = 予測市場のYES価格ベースの市場確率`")
-    lines.append("`厚み = 市場データの強さ。確率の高さとは別`")
+    lines.append("`薄 / 中 / 厚 = 市場データの厚み。確率の高さとは別`")
 
     return "\n".join(lines)
 
