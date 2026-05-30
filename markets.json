@@ -1,0 +1,94 @@
+{
+  "markets": [
+    {
+      "key": "oil_wti",
+      "display": "💧Oil - WTI",
+      "category": "oil",
+      "enabled": true,
+      "center_type": "manual",
+      "manual_center": 86.8552,
+      "binance_symbol": "",
+      "grid_step": 1,
+      "range_pct": 0.1,
+      "search_queries": [
+        "WTI",
+        "WTI crude",
+        "WTI crude oil"
+      ],
+      "keywords": [
+        "wti",
+        "crude oil",
+        "west texas"
+      ],
+      "exclude": [
+        "olive oil",
+        "palm oil",
+        "cooking oil",
+        "vegetable oil",
+        "brent"
+      ]
+    },
+    {
+      "key": "gold_xau",
+      "display": "🥇Gold - XAU",
+      "category": "commodity",
+      "enabled": true,
+      "center_type": "manual",
+      "manual_center": 4540.52,
+      "binance_symbol": "",
+      "grid_step": 50,
+      "range_pct": 0.12,
+      "search_queries": [
+        "gold above",
+        "gold below",
+        "gold price",
+        "gold hit",
+        "gold reach",
+        "XAU"
+      ],
+      "keywords": [
+        "gold",
+        "xau"
+      ],
+      "exclude": [
+        "gold medal",
+        "golden globes",
+        "golden globe",
+        "gold cup",
+        "gold rush",
+        "golden state",
+        "silver",
+        "bitcoin",
+        "btc",
+        "ethereum",
+        "eth"
+      ]
+    },
+    {
+      "key": "btc",
+      "display": "💰BTC",
+      "category": "crypto",
+      "enabled": true,
+      "center_type": "binance",
+      "manual_center": null,
+      "binance_symbol": "BTCUSDT",
+      "grid_step": 500,
+      "range_pct": 0.1,
+      "search_queries": [
+        "bitcoin above",
+        "bitcoin below",
+        "bitcoin hit",
+        "bitcoin reach",
+        "bitcoin price"
+      ],
+      "keywords": [
+        "bitcoin",
+        "btc"
+      ],
+      "exclude": [
+        "gold",
+        "silver"
+      ]
+    }
+  ]
+}
