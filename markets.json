@@ -4,17 +4,18 @@
       "key": "oil_wti",
       "display": "💧 Oil - WTI",
       "enabled": true,
-      "center_type": "ostium",
-      "ostium_asset": "WTI",
-      "ostium_asset_candidates": [
-        "WTI",
-        "WTI/USD",
-        "US WTI",
-        "Crude Oil",
+      "center_type": "hyperliquid",
+      "hyperliquid_coin": "CL",
+      "hyperliquid_coin_candidates": [
         "CL",
-        "CL/USD"
+        "WTIOIL",
+        "WTI",
+        "CLUSDC",
+        "CLUSD",
+        "xyz:CL",
+        "xyz:WTIOIL"
       ],
-      "manual_center": 87,
+      "manual_center": 89,
       "grid_step": 1,
       "range_pct": 0.2,
       "search_queries": [
@@ -29,56 +30,31 @@
       ],
       "exclude": [
         "brent",
-        "gas",
+        "gasoline",
         "natural gas",
-        "bitcoin",
-        "btc",
-        "ethereum",
-        "eth"
-      ]
-    },
-    {
-      "key": "gold_xau",
-      "display": "🥇 Gold - XAU",
-      "enabled": true,
-      "center_type": "ostium",
-      "ostium_asset": "XAU",
-      "ostium_asset_candidates": [
-        "XAU",
-        "XAU/USD",
-        "Gold"
-      ],
-      "manual_center": 4550,
-      "grid_step": 50,
-      "range_pct": 0.12,
-      "search_queries": [
-        "Gold",
-        "XAU"
-      ],
-      "keywords": [
-        "gold",
-        "xau"
-      ],
-      "exclude": [
+        "gas price",
         "bitcoin",
         "btc",
         "ethereum",
         "eth",
-        "oil",
-        "wti",
-        "silver",
-        "xag"
+        "gold",
+        "silver"
       ]
     },
     {
       "key": "btc",
-      "display": "💰 BTC",
+      "display": "₿ BTC",
       "enabled": true,
       "center_type": "hyperliquid",
       "hyperliquid_coin": "BTC",
+      "hyperliquid_coin_candidates": [
+        "BTC",
+        "BTCUSDC",
+        "BTCUSD"
+      ],
       "manual_center": 74000,
-      "grid_step": 500,
-      "range_pct": 0.12,
+      "grid_step": 1000,
+      "range_pct": 0.15,
       "search_queries": [
         "BTC",
         "Bitcoin"
@@ -90,10 +66,11 @@
       "exclude": [
         "ethereum",
         "eth",
-        "gold",
-        "xau",
         "oil",
-        "wti"
+        "wti",
+        "crude",
+        "gold",
+        "silver"
       ]
     }
   ]
